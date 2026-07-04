@@ -44,10 +44,35 @@ def validate_path(file_path: str) -> str:
 # The only permitted MCP tools. Enforced at config time.
 ALLOWED_MCP_TOOLS = frozenset({
     "read_file",
-    "list_directory",
-    "search_files",
     "get_file_metadata",
 })
+
+# Directories to exclude from listing to prevent massive token usage and rate limits
+EXCLUDED_DIRS = frozenset({
+    ".venv", ".git", "__pycache__", ".pytest_cache", 
+    "node_modules", "dist", "build", ".idea", ".vscode"
+})
+
+def list_directory(directory_path: str) -> dict:
+    """List the contents of a directory.
+
+    Args:
+        directory_path: The absolute or relative path to the directory to list.
+    """
+    import os
+    import logging
+    logger = logging.getLogger("list_directory_filtered")
+    
+    entries = []
+    try:
+        for entry in os.scandir(directory_path):
+            if entry.name in EXCLUDED_DIRS:
+                continue
+            entries.append({"name": entry.name, "is_directory": entry.is_dir()})
+        logger.info("Listed %r, found %d items (after filtering).", directory_path, len(entries))
+        return {"entries": entries}
+    except Exception as e:
+        return {"error": str(e)}
 
 class MCPConfig:
     """Configuration for an MCP connection."""
@@ -56,7 +81,7 @@ class MCPConfig:
         self.auth_token = auth_token
 
 def build_mcp_toolset(data_source: Literal["github", "filesystem"], config: MCPConfig):
-    """Build an McpToolset restricted to ALLOWED_MCP_TOOLS."""
+    """Build an McpToolset restricted to ALLOWED_MCP_TOOLS, along with custom python tools."""
     from app.mcp.filesystem_mcp import configure_filesystem_mcp
 
     if data_source == "filesystem":
@@ -81,8 +106,11 @@ def build_mcp_toolset(data_source: Literal["github", "filesystem"], config: MCPC
 
     # Initialize the toolset with our connection params and filter
     # by our strict ALLOWED_MCP_TOOLS whitelist.
-    return LoggingMcpToolset(
+    mcp_toolset = LoggingMcpToolset(
         connection_params=connection_params,
         tool_filter=list(ALLOWED_MCP_TOOLS)
     )
+    
+    # Return our safe python tools + the heavily restricted MCP toolset
+    return [list_directory, mcp_toolset]
 

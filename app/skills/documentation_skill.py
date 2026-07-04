@@ -53,7 +53,7 @@ You MUST respond with a RAW JSON object matching this exact schema:
   }
 }
 Do NOT wrap the response in markdown blocks (```json). Just return the raw JSON object.""",
-        tools=[mcp_toolset],
+        tools=mcp_toolset,
     )
     
     prompt = f"Analyze the documentation for the repository at: {request.repo_target}. Maximum files to consider: {request.max_files_to_scan}."

@@ -11,8 +11,8 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-MAX_LLM_RETRIES = 5
-SKILL_COOLDOWN_SECONDS = 2.0
+MAX_LLM_RETRIES = 10
+SKILL_COOLDOWN_SECONDS = 15.0
 
 
 def extract_json_text(raw: str) -> str:
@@ -48,13 +48,40 @@ def extract_json_text(raw: str) -> str:
 def _retry_delay_seconds(exc: BaseException, attempt: int) -> float:
     """Extract retry delay from a rate-limit error, or use exponential backoff."""
     message = str(exc)
+    
+    # 1. Attempt to extract the official RetryInfo from the error details payload
+    retry_info_match = re.search(
+        r"'@type': 'type\.googleapis\.com/google\.rpc\.RetryInfo',\s*'retryDelay':\s*'([0-9.]+)s'",
+        message
+    )
+    if retry_info_match:
+        return float(retry_info_match.group(1)) + 1.0
+        
+    # 2. Fallback to extracting the human-readable retry string if present
     match = re.search(r"retry in ([0-9.]+)s", message, re.IGNORECASE)
     if match:
         return float(match.group(1)) + 1.0
+        
+    # 3. Default to exponential backoff
     return min(60.0, 5.0 * (2**attempt))
 
 
+def _is_daily_quota_exhausted(exc: BaseException) -> bool:
+    """Return True when the per-day free-tier quota is exhausted (non-retryable)."""
+    message = str(exc)
+    # The API reports daily exhaustion via GenerateRequestsPerDay* quota IDs
+    if "PerDay" in message and "RESOURCE_EXHAUSTED" in message:
+        return True
+    if exc.__cause__ is not None:
+        return _is_daily_quota_exhausted(exc.__cause__)
+    return any(_is_daily_quota_exhausted(sub) for sub in getattr(exc, "exceptions", ()))
+
+
 def _is_retryable_llm_error(exc: BaseException) -> bool:
+    """Return True for transient per-minute rate limits and service unavailable errors."""
+    # Daily quota is NOT retryable — do not mask it as retryable
+    if _is_daily_quota_exhausted(exc):
+        return False
     message = str(exc)
     if any(token in message for token in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE")):
         return True
@@ -130,10 +157,24 @@ async def run_agent_prompt(
             return response_text
         except Exception as exc:
             last_error = exc
+            if _is_daily_quota_exhausted(exc):
+                logger.error(
+                    "Agent %s: Gemini daily free-tier quota exhausted. "
+                    "This quota resets at midnight Pacific Time. "
+                    "To continue now, set GEMINI_API_KEY to a key with billing enabled, "
+                    "or set GEMINI_MODEL to a model with remaining daily quota.",
+                    agent.name,
+                )
+                raise RuntimeError(
+                    f"Daily Gemini quota exhausted for model '{os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')}'. "
+                    "The 20 requests/day free-tier limit has been reached. "
+                    "Quota resets at midnight Pacific Time. "
+                    "To run now: set GEMINI_MODEL=gemini-2.0-flash or enable billing on your API key."
+                ) from exc
             if _is_retryable_llm_error(exc) and attempt < MAX_LLM_RETRIES - 1:
                 delay = _retry_delay_seconds(exc, attempt)
                 logger.warning(
-                    "Agent %s hit transient LLM error (attempt %d/%d); retrying in %.1fs: %s",
+                    "Agent %s hit transient RPM limit (attempt %d/%d); retrying in %.1fs: %s",
                     agent.name,
                     attempt + 1,
                     MAX_LLM_RETRIES,

@@ -50,7 +50,7 @@ You MUST respond with a RAW JSON object matching this exact schema:
   }
 }
 Do NOT wrap the response in markdown blocks (```json). Just return the raw JSON object.""",
-        tools=[mcp_toolset],
+        tools=mcp_toolset,
     )
     
     # 3. Execute the analysis flow
